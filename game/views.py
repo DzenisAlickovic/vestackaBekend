@@ -8,9 +8,9 @@ from .ai import minimax, alphabeta
 # Configure logging
 logger = logging.getLogger(__name__)
 
-DEPTH_EASY = 2
+DEPTH_EASY = 3
 DEPTH_MEDIUM = 4
-DEPTH_HARD = 5
+DEPTH_HARD = 4
 
 @csrf_exempt
 def make_move(request):

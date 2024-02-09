@@ -1,3 +1,4 @@
+import copy
 from typing import Union, List, Dict
 
 State = Dict[str, Union[int, List[List[List[int]]]]]
@@ -7,14 +8,16 @@ from typing import Union, Tuple
 
 Move = Union[Tuple[str, int, int, int, int], Tuple[str, int, int, int, int, int, int, int]]
 
+SET_PIECE= 'set'
+MOVE_PIECE= 'move'
+REMOVE_PIECE= 'remove'
 
 WHITE = 1
 BLACK = -1
 
-SET_PIECE = 'set'
-MOVE_PIECE = 'move'
-REMOVE_PIECE = 'remove' 
-
+# potez izgleda ovako (MOVE_TYPE, MOVE_COLOR, MOVE_X, MOVE_Y, MOVE_Z)
+# ove konstante su indeksi u tuple koji predstavlja potez
+# npr: ako indeksiramo potez sa MOVE_TYPE (nulom), dobicemo tip poteza
 MOVE_TYPE = 0
 MOVE_COLOR = 1
 MOVE_X = 2
@@ -22,160 +25,241 @@ MOVE_Y = 3
 MOVE_Z = 4
 
 
-def is_end(state: State) -> bool:
-    return state['white_remaining'] == 0 and state['black_remaining'] == 0 and (state['white_count'] <= 2 or state['black_count'] <= 2)
-
-def can_move(state: State, player: int) -> bool:
-    # Check if there are any legal moves available for 'player'
-    return any(get_moves(state, player, False))
-
-WINNING_SCORE = 100000
-LINE_VALUE = 500  # Vrednost za formiranje linije
-JUMPING_VALUE = 150 
-mill_potential_value = 1000  
-block_mill_value = 800  
-def evaluate(state: State, current_player: int, last_move: Move = None) -> int:
-    value = 0  # Initialize the value variable
-    opponent = -current_player
-
-    mill_potential_value = 1000  # Value for potential mills
-    block_mill_value = 800  # Value for blocking opponent mills
-
-    # Basic evaluation based on the number and positions of pieces
-    for square in range(3):
-        for line in range(3):
-            line_sum = sum(state['pieces'][square][line])
-            col_sum = sum(state['pieces'][square][i][line % 2] for i in range(3))
-
-            if abs(line_sum) == 3:  # Complete mill
-                value += (LINE_VALUE if line_sum / 3 == current_player else -LINE_VALUE)
-            if abs(col_sum) == 3:  # Complete mill
-                value += (LINE_VALUE if col_sum / 3 == current_player else -LINE_VALUE)
-
-            # Evaluate potential and blocked mills
-            if state['pieces'][square][line].count(current_player) == 2 and state['pieces'][square][line].count(None) == 1:
-                value += mill_potential_value
-            if state['pieces'][square][line].count(opponent) == 2 and state['pieces'][square][line].count(None) == 1:
-                value += block_mill_value
-
-    # Evaluate jumping value
-    if state['white_count'] == 3:
-        value += (JUMPING_VALUE if current_player == WHITE else -JUMPING_VALUE)
-    if state['black_count'] == 3:
-        value += (JUMPING_VALUE if current_player == BLACK else -JUMPING_VALUE)
-
-    # Winning condition
-    if state['black_count'] <= 2 or not can_move(state, BLACK):
-        return (WINNING_SCORE if current_player == WHITE else -WINNING_SCORE)
-    if state['white_count'] <= 2 or not can_move(state, WHITE):
-        return (WINNING_SCORE if current_player == BLACK else -WINNING_SCORE)
-
-    # Additional points for the possibility of forming a line again after moving a piece
-    if last_move and last_move[MOVE_TYPE] == MOVE_PIECE and can_form_line_again(state, current_player, last_move[5], last_move[6], last_move[7]):
-        value += 150
-    elif last_move and last_move[MOVE_TYPE] == REMOVE_PIECE and can_form_line_again(state, current_player, last_move[2], last_move[3], last_move[4]):
-        value += 500
-
-    return value
-
-def can_form_line_again(state: State, player: int, from_x: int, from_y: int, from_z: int) -> bool:
-    # Save the original state to restore later
-    original_state = state['pieces'][from_x][from_y][from_z]
-    state['pieces'][from_x][from_y][from_z] = 0
-
-    # Check potential moves to reform the line
-    potential_moves = get_neighboaring_empty_spots(state, from_x, from_y, from_z)
-    for to_x, to_y, to_z in potential_moves:
-        # Temporarily make the move
-        state['pieces'][to_x][to_y][to_z] = player
-        # Check if it forms a line
-        if is_making_line(state, ('move', player, to_x, to_y, to_z, from_x, from_y, from_z)):
-            # Restore the state before returning
-            state['pieces'][to_x][to_y][to_z] = 0
-            state['pieces'][from_x][from_y][from_z] = original_state
+def is_end(state):
+    # Ako nema preostalih figura za postavljanje i broj figura na tabli je 2 ili manje, igra je završena
+    if state['white_remaining'] == 0 and state['black_remaining'] == 0:
+        if state['white_count'] <= 2 or state['black_count'] <= 2:
             return True
-        # Restore the state after checking
-        state['pieces'][to_x][to_y][to_z] = 0
-
-    # Restore the original state
-    state['pieces'][from_x][from_y][from_z] = original_state
+        # Proverava da li igrač na potezu ima mogućih poteza
+        current_player = WHITE if state['turn'] % 2 == 0 else BLACK
+        if not can_move(state, current_player):
+            return True
     return False
 
 
+# pieces[square][line][spot]
+# [
+#       0  1  2 
+#       ^--^--^--- polja unutar linije      
+#    
+#     [[0, 0, 0],   kvadrat 0   linija 0
+#      [0, X, 0],               linija 1
+#      [0, 0, 0]],              linija 2
+#
+#     [[0, 0, 0],   kvadrat 1   linija 0
+#      [0, X, 0],               linija 1
+#      [0, 0, 0]],              linija 2
+#
+#     [[0, 0, 0],   kvadrat 2   linija 0
+#      [0, X, 0],               linija 1
+#      [0, 0, 0]],              linija 2
+# ]
+
+def can_move(state, player):
+    # Ova funkcija bi trebala da proverava da li igrač može da napravi bilo kakav potez
+    # Za svaku figuru igrača proverite da li postoje slobodna susedna mesta na koja se može pomeriti
+    for s, square in enumerate(state['pieces']):
+        for i, row in enumerate(square):
+            for j, spot in enumerate(row):
+                if spot == player:
+                    # Ako postoji barem jedan validan potez, vrati True
+                    for x, y, z in get_neighboaring_empty_spots(state, s, i, j):
+                        return True
+    return False
+WINNING_SCORE = 100000
+LINE_VALUE = 8000
+mill_potential_value = 3500
+mill_forming_potential_value = 9000
+potential_line_value = 1000
+
+def evaluate(state):
+    value = 0
+    pieces = state['pieces']
+    player = WHITE if state['turn'] % 2 == 0 else BLACK  # Određujemo igrača na potezu
+    block_mill_value = 10000 if state['white_remaining'] > 0 or state['black_remaining'] > 0 else 4000
+
+    # Proveravamo za svaki kvadrat i svaku liniju
+    for square in range(3):
+        for line in range(3):
+            line_pieces = pieces[square][line]
+            col_pieces = [pieces[square][i][line] for i in range(3)]  
+
+            # Postojeće evaluacije
+            line_sum = sum(line_pieces)
+            col_sum = sum(col_pieces)
+            if abs(line_sum) == 3:
+                value += LINE_VALUE if line_sum > 0 else -LINE_VALUE
+            if abs(col_sum) == 3:
+                value += LINE_VALUE if col_sum > 0 else -LINE_VALUE
+
+            # Evaluacija potencijalnih linija
+            if line_pieces.count(1) == 2 and line_pieces.count(0) == 1 or col_pieces.count(1) == 2 and col_pieces.count(0) == 1:
+                value += mill_potential_value
+            if line_pieces.count(-1) == 2 and line_pieces.count(0) == 1 or col_pieces.count(-1) == 2 and col_pieces.count(0) == 1:
+                value -= mill_potential_value
+                
+                 # Provera da li igrač može blokirati mlin protivnika
+            if line_pieces.count(-1) == 2 and line_pieces.count(0) == 1:
+                value += block_mill_value
+            if col_pieces.count(-1) == 2 and col_pieces.count(0) == 1:
+                value += block_mill_value
+            
+            # Dodavanje potencijalne vrednosti za linije koje još nisu formirane
+            if line_pieces.count(1) == 2 and line_pieces.count(0) == 1 or col_pieces.count(1) == 2 and col_pieces.count(0) == 1:
+                value += potential_line_value if line_pieces.count(1) > line_pieces.count(-1) else -potential_line_value
+
+    # Uslov pobede
+    if state['black_count'] <= 2 or not can_move(state, -1):
+        return WINNING_SCORE if state['turn'] % 2 == 0 else -WINNING_SCORE
+    if state['white_count'] <= 2 or not can_move(state, 1):
+        return WINNING_SCORE if state['turn'] % 2 != 0 else -WINNING_SCORE
+
+    # Broj komada kao dodatni faktor
+    value += (state['white_count'] - state['black_count']) * 5000
+    # Dodajemo dodatne poene ako AI ima mogućnost da formira mlin
+    for x in range(3):
+        for y in range(3):
+            for z in range(3):
+                if pieces[x][y][z] == player and can_break_and_reform_mill(state, player, x, y, z):
+                    value += mill_forming_potential_value
+
+    return value
+def easy_evaluate(state):
+    value = 0
+    pieces = state['pieces']
+    block_mill_value = 100000 if state['white_remaining'] > 0 or state['black_remaining'] > 0 else 6000 
+     # Proveravamo za svaki kvadrat i svaku liniju
+    for square in range(3):
+        for line in range(3):
+            line_pieces = pieces[square][line]
+            col_pieces = [pieces[square][i][line] for i in range(3)]  
+
+            # Postojeće evaluacije
+            line_sum = sum(line_pieces)
+            col_sum = sum(col_pieces)
+            if abs(line_sum) == 3:
+                value += LINE_VALUE if line_sum > 0 else -LINE_VALUE
+            if abs(col_sum) == 3:
+                value += LINE_VALUE if col_sum > 0 else -LINE_VALUE
+                
+                 # Provera da li igrač može blokirati mlin protivnika
+            if line_pieces.count(-1) == 2 and line_pieces.count(0) == 1:
+                value += block_mill_value
+            if col_pieces.count(-1) == 2 and col_pieces.count(0) == 1:
+                value += block_mill_value
+                
+            
+
+    # Uslov pobede
+    if state['black_count'] <= 2 or not can_move(state, -1):
+        return WINNING_SCORE if state['turn'] % 2 == 0 else -WINNING_SCORE
+    if state['white_count'] <= 2 or not can_move(state, 1):
+        return WINNING_SCORE if state['turn'] % 2 != 0 else -WINNING_SCORE
+     # Broj komada kao dodatni faktor
+    value += (state['white_count'] - state['black_count']) * 5000
+    return value
+def medium_evaluate(state):
+    value = 0
+    pieces = state['pieces']
+    block_mill_value = 20000 if state['white_remaining'] > 0 or state['black_remaining'] > 0 else 6000 
+     # Proveravamo za svaki kvadrat i svaku liniju
+    for square in range(3):
+        for line in range(3):
+            line_pieces = pieces[square][line]
+            col_pieces = [pieces[square][i][line] for i in range(3)]  
+
+            # Postojeće evaluacije
+            line_sum = sum(line_pieces)
+            col_sum = sum(col_pieces)
+            if abs(line_sum) == 3:
+                value += LINE_VALUE if line_sum > 0 else -LINE_VALUE
+            if abs(col_sum) == 3:
+                value += LINE_VALUE if col_sum > 0 else -LINE_VALUE
+
+            # Evaluacija potencijalnih linija
+            if line_pieces.count(1) == 2 and line_pieces.count(0) == 1 or col_pieces.count(1) == 2 and col_pieces.count(0) == 1:
+                value += mill_potential_value
+            if line_pieces.count(-1) == 2 and line_pieces.count(0) == 1 or col_pieces.count(-1) == 2 and col_pieces.count(0) == 1:
+                value -= mill_potential_value
+                
+                 # Provera da li igrač može blokirati mlin protivnika
+            if line_pieces.count(-1) == 2 and line_pieces.count(0) == 1:
+                value += block_mill_value
+            if col_pieces.count(-1) == 2 and col_pieces.count(0) == 1:
+                value += block_mill_value
+                 # Dodavanje potencijalne vrednosti za linije koje još nisu formirane
+            if line_pieces.count(1) == 2 and line_pieces.count(0) == 1 or col_pieces.count(1) == 2 and col_pieces.count(0) == 1:
+                value += potential_line_value if line_pieces.count(1) > line_pieces.count(-1) else -potential_line_value
+            
+    # Uslov pobede
+    if state['black_count'] <= 2 or not can_move(state, -1):
+        return WINNING_SCORE if state['turn'] % 2 == 0 else -WINNING_SCORE
+    if state['white_count'] <= 2 or not can_move(state, 1):
+        return WINNING_SCORE if state['turn'] % 2 != 0 else -WINNING_SCORE
+     # Broj komada kao dodatni faktor
+    value += (state['white_count'] - state['black_count']) * 5000
+    return value
+
+def can_break_and_reform_mill(state, player, from_x, from_y, from_z):
+    # Pretpostavljamo da se figura može pomeriti samo na susedna prazna mesta
+    original_piece = state['pieces'][from_x][from_y][from_z]
+    state['pieces'][from_x][from_y][from_z] = 0  # Privremeno uklanjamo figuru
+
+    # Proveravamo sve susedne pozicije
+    for (to_x, to_y, to_z) in get_neighboaring_empty_spots(state, from_x, from_y, from_z):
+        state['pieces'][to_x][to_y][to_z] = player  # Simuliramo pomeranje na susedno mesto
+        if is_making_line(state, ('move', player, to_x, to_y, to_z, from_x, from_y, from_z)):
+            # Ako formiramo mlin, proveravamo možemo li ponovno formirati mlin pomeranjem nazad
+            state['pieces'][to_x][to_y][to_z] = 0  # Vraćamo na prazno mesto
+            state['pieces'][from_x][from_y][from_z] = original_piece  # Vraćamo originalnu figuru
+            if is_making_line(state, ('move', player, from_x, from_y, from_z, to_x, to_y, to_z)):
+                return True  # Možemo formirati mlin ponovnim pomeranjem
+        state['pieces'][to_x][to_y][to_z] = 0  # Vraćamo na prazno mesto
+
+    state['pieces'][from_x][from_y][from_z] = original_piece  # Vraćamo originalnu figuru
+    return False
+
+
+# prazna polja koja su susedna nekom kamenu.
+# x, y, z su koordinata datog kamena
 def get_neighboaring_empty_spots(state, x, y, z):
     pieces = state['pieces']
-    
-    # left
+
+    # gde imaju sloboda mesta na levoj strani gde da stavi kamen
     if y != 1 and z - 1 >= 0 and pieces[x][y][z - 1] == 0:
         yield x, y, z - 1
-    
-    # right
+
+    # gde imaju sloboda mesta na desnoj strani
     if y != 1 and z + 1 <= 2 and pieces[x][y][z + 1] == 0:
         yield x, y, z + 1
-    
-    # up
+
+    # gore
     if z != 1 and y - 1 >= 0 and pieces[x][y - 1][z] == 0:
         yield x, y - 1, z
-    
-    # down
+
+    # dole
     if z != 1 and y + 1 <= 2 and pieces[x][y + 1][z] == 0:
         yield x, y + 1, z
-    
-    # cross-square out
+
+    # proverava ima li prazno polje po liniji koa spaja kvadrate
+    # gleda ka spoljnjem kvadratu (kvadratu koji je oko trenutnog)
     if (y == 1 or z == 1) and x - 1 >= 0 and pieces[x - 1][y][z] == 0:
         yield x - 1, y, z
-    
-    # cross-square in
+
+    # proverava ima li prazno polje po liniji koa spaja kvadrate
+    # gleda ka unutrasnjem kvadratu (kvadratu koji je unutar trenutnog)
     if (y == 1 or z == 1) and x + 1 <= 2 and pieces[x + 1][y][z] == 0:
         yield x + 1, y, z
-def get_moves(state: State, player: int, line_made: bool) -> list[Move]:
-    moves = []
-    if line_made:
-        # Koristi funkcije get_non_mill_pieces i get_mill_pieces za dobijanje figura
-        non_mill_pieces = get_non_mill_pieces(state, -player)
-        mill_pieces = get_mill_pieces(state, -player)
-        
-        if non_mill_pieces:
-            moves.extend(non_mill_pieces)
-        else:
-            moves.extend(mill_pieces)
-    else:
-        # Proces postavljanja i pomeranja figura
-        if state[f'{color(player)}_remaining'] > 0:
-            # Logika za postavljanje figura
-            for s, square in enumerate(state['pieces']):
-                for i, row in enumerate(square):
-                    for j, element in enumerate(row):
-                        if i == 1 and j == 1:  # preskakanje centralne tačke
-                            continue
-                        if element == 0:
-                            moves.append(('set', player, s, i, j))
-        else:
-            # Logika za pomeranje figura
-            for s, square in enumerate(state['pieces']):
-                for i, row in enumerate(square):
-                    for j, element in enumerate(row):
-                        if element == player:
-                            if state[f'{color(player)}_count'] <= 3:
-                                # Skakanje na bilo koje prazno mesto
-                                for x, square_x in enumerate(state['pieces']):
-                                    for y, row_y in enumerate(square_x):
-                                        for z, _ in enumerate(row_y):
-                                            if state['pieces'][x][y][z] == 0:
-                                                moves.append(('move', player, x, y, z, s, i, j))
-                            else:
-                                # Standardno pomeranje na susedna prazna mesta
-                                for x, y, z in get_neighboaring_empty_spots(state, s, i, j):
-                                    moves.append(('move', player, x, y, z, s, i, j))
-    return moves
+
 
 def get_non_mill_pieces(state: State, opponent: int) -> list[Move]:
     non_mill_pieces = []
+    mill_pieces = get_mill_pieces(state, opponent)  # Get mill pieces to check if all pieces are in mills
     for s, square in enumerate(state['pieces']):
         for i, row in enumerate(square):
             for j, piece in enumerate(row):
                 if piece == opponent:
-                    if not is_making_line(state, ('check', opponent, s, i, j)):
+                    if not is_making_line(state, ('check', opponent, s, i, j)) or not mill_pieces:
                         non_mill_pieces.append(('remove', -opponent, s, i, j))
     return non_mill_pieces
 
@@ -189,177 +273,204 @@ def get_mill_pieces(state: State, opponent: int) -> list[Move]:
                         mill_pieces.append(('remove', -opponent, s, i, j))
     return mill_pieces
 
-def isMoveValid(move: Move, state: State) -> bool:
-    move_type, player, x, y, z, *rest = move
+def get_moves(state, player, line_made):
+    moves = []
+    # Provera da li je napravljena linija, ako jeste uklanjaju se protivničke figure koje nisu deo mill-a
+    if line_made:
+        non_mill_opponents = get_non_mill_pieces(state, -player)
+        if non_mill_opponents:
+            moves.extend(non_mill_opponents)
+        else:
+            mill_opponents = get_mill_pieces(state, -player)
+            moves.extend(mill_opponents)
+        return moves
 
-    if move_type == SET_PIECE:
-        # Proverava da li je polje slobodno za postavljanje figure
-        return state['pieces'][x][y][z] == 0 and state[f'{color(player)}_remaining'] > 0
+    # Logika za postavljanje figura na tablu
+    current_player_remaining = 'white_remaining' if player == WHITE else 'black_remaining'
+    if state[current_player_remaining] > 0:
+        for s, square in enumerate(state['pieces']):
+            for i, row in enumerate(square):
+                for j, element in enumerate(row):
+                    if i == 1 and j == 1:  # Preskakanje centra
+                        continue
+                    if element == 0:  # Prazno polje
+                        moves.append((SET_PIECE, player, s, i, j))
+    else:
+        # Logika za pomeranje figura na tabli
+        for s, square in enumerate(state['pieces']):
+            for i, row in enumerate(square):
+                for j, element in enumerate(row):
+                    if element == player:
+                        for x, y, z in get_neighboaring_empty_spots(state, s, i, j):
+                            moves.append((MOVE_PIECE, player, x, y, z, s, i, j))
 
-    elif move_type == MOVE_PIECE:
-        from_x, from_y, from_z = rest
-        # Proverava da li igrač pomeri svoju figuru na slobodno mesto
-        # Ako igrač ima 3 ili manje figura, može se pomerati na bilo koje slobodno mesto
-        if state['pieces'][from_x][from_y][from_z] == player:
-            if state['white_count' if player == WHITE else 'black_count'] <= 3:
-                return state['pieces'][x][y][z] == 0  # Dozvoljeno skakanje
-            else:
-                return state['pieces'][x][y][z] == 0 and any(
-                    (x, y, z) == spot for spot in get_neighboaring_empty_spots(state, from_x, from_y, from_z)
-                )
-        return False
+    return moves
 
-    elif move_type == REMOVE_PIECE:
-        # Proverava da li igrač uklanja protivničku figuru koja nije deo linije, osim ako su sve protivničke figure u linijama
-        if state['pieces'][x][y][z] == -player:
-            if not is_making_line(state, move) or all_figures_in_line(state, -player):
-                return True
-
-    return False
-
-
-def color(player):
-    return 'white' if player == WHITE else 'black'
-
-def all_figures_in_line(state, player):
-    for s, square in enumerate(state['pieces']):
-        for i, row in enumerate(square):
-            for j, element in enumerate(row):
-                if element == player:
-                    if not is_making_line(state, ('check', player, s, i, j)):
-                        return False
-    return True
-
-def is_making_line(state: State, move: Move) -> bool:
+def is_making_line(state, move):
     pieces = state['pieces']
     _, _, x, y, z, *_ = move
 
-    # Provera horizontalne linije u trenutnom kvadratu
+    # Provera horizontalnu liniju
     if abs(sum(pieces[x][y])) == 3:
         return True
-    
-    # Provera vertikalne linije u trenutnom kvadratu
+
+    # Provera vertikalnu liniju
     if abs(sum(pieces[x][i][z] for i in range(3))) == 3:
         return True
-    
-    # Provera horizontalne linije kroz srednji red svih kvadrata
-    if y == 1 and abs(sum(pieces[i][y][z] for i in range(3))) == 3:
-        return True
-    
-    # Provera vertikalne linije kroz srednju kolonu svih kvadrata
-    if z == 1 and abs(sum(pieces[x][i][1] for i in range(3))) == 3:
-        return True
+
+    # Provera linija(sredisnja) koje spajaju kvadrate
+    if y == 0 or y == 2:
+        # gornja sredisnja linija
+        if abs(sum(pieces[x][0][1] for x in range(3))) == 3:
+            return True
+        # donja
+        if abs(sum(pieces[x][2][1] for x in range(3))) == 3:
+            return True
+    if z == 0 or z == 2:
+        # leva
+        if abs(sum(pieces[x][1][0] for x in range(3))) == 3:
+            return True
+        # desna
+        if abs(sum(pieces[x][1][2] for x in range(3))) == 3:
+            return True
 
     return False
 
 
-def apply_move(state: State, move: Move):
+# ovde prati trenutno stanje
+def apply_move(state, move):
     pieces = state['pieces']
-    if move is None:
-        raise ValueError("A move cannot be None")
-    if move[MOVE_TYPE] == SET_PIECE:
-        _, color, x, y, z = move
-        if None in (x, y, z):
-            raise ValueError(f"Invalid move coordinates: {move}")
+    if move[MOVE_TYPE] == SET_PIECE:  # koji je potez na redu u ovom slucaju je postavljanje
+        _, color, x, y, z = move  # uzimamo koordinate tog kamena i njegovu boju
+        # na tim koordinatama postavljamo kamen odgovarajuce boje
         pieces[x][y][z] = color
+        # kada postavi kamen smanjuje za jedan od onih koje ima
         state['white_remaining' if color == WHITE else 'black_remaining'] -= 1
+        # povecava broj kamena na tabli
         state['white_count' if color == WHITE else 'black_count'] += 1
-    elif move[MOVE_TYPE] == REMOVE_PIECE:
-        _, color, x, y, z = move
+    elif move[MOVE_TYPE] == REMOVE_PIECE:  # sada ako je na redu uklanjanje
+        _, color, x, y, z = move  # isto proverava koordinate kamena koji uklanjamo
+        # kada pojedemo kamen tu stavljamo stanje 0, znaci da na toj koordinati nema vise kamena na tabli
         pieces[x][y][z] = 0
+        # gleda se koja je boja, i uklanja se taj kamen
         state['white_count' if color == WHITE else 'black_count'] -= 1
-    elif move[MOVE_TYPE] == MOVE_PIECE:
+    elif move[MOVE_TYPE] == MOVE_PIECE:  # pomeranje kamena
+        # sada uzimamo koordinate oba kamena gde treba da postavi i gde da makne
+        # sa koordinata koje pocinju sa 'from' se uklanja kamen
+        # a na koordinate koje pocinju sa 'to' se postavlja kamen
         _, color, to_x, to_y, to_z, from_x, from_y, from_z = move
+        # na to mesto gde se makao kamen restartuje vrednost na 0
         pieces[from_x][from_y][from_z] = 0
+        # na toj novoj poziciji gde se postavio kamen se stavlja odgovarajuca boja odnosno vrednost
         pieces[to_x][to_y][to_z] = color
-        
+
     state['turn'] += 1
 
 
-def undo_move(state: State, move: Move):
-    pieces = state['pieces']
-    if move[MOVE_TYPE] == SET_PIECE:
-        _, color, x, y, z = move
-        pieces[x][y][z] = 0
-        state['white_remaining' if color == WHITE else 'black_remaining'] += 1
-        state['white_count' if color == WHITE else 'black_count'] -= 1
-    elif move[MOVE_TYPE] == REMOVE_PIECE:
-        _, color, x, y, z = move
-        pieces[x][y][z] = color * -1
-        state['white_count' if color == WHITE else 'black_count'] += 1
-    elif move[MOVE_TYPE] == MOVE_PIECE:
-        _, color, to_x, to_y, to_z, from_x, from_y, from_z = move
-        pieces[from_x][from_y][from_z] = color
-        pieces[to_x][to_y][to_z] = 0
-    
-    state['turn'] += 1
-def minimax(state, depth, current_player, line_made=False):
+def minimax(state, depth, player, line_made=False):
     if depth == 0 or is_end(state):
-        return evaluate(state, current_player), None
+        return easy_evaluate(state), None
 
-    best_eval = -float('inf') if current_player == WHITE else float('inf')
-    best_move = None
-
-    for move in get_moves(state, current_player, line_made):
-        if isMoveValid(move, state):
-            apply_move(state, move)
-            eval, _ = minimax(state, depth - 1, -current_player, is_making_line(state, move))
-            undo_move(state, move)
-
-            if current_player == WHITE and eval > best_eval:
-                best_eval = eval
-                best_move = move
-            elif current_player == BLACK and eval < best_eval:
-                best_eval = eval
-                best_move = move
-
-    return best_eval, best_move
-
-def apply_temporary_move(state: State, move: Move, current_player: int) -> int:
-    if not isMoveValid(move, state):
-        return -float('inf') if move[1] == current_player else float('inf')
-
-    apply_move(state, move)
-    score = evaluate(state, move[1], last_move=move)
-    undo_move(state, move)
-    return score
-
-def alphabeta(state: State, depth: int, alpha: int, beta: int, player: int, line_made: bool = False) -> tuple[int, Move | None]:
-    if depth == 0 or is_end(state):
-        return evaluate(state, player), None  # Include the current player in the evaluation
-
-    next_player = -player
-    best_move = None
-
+    next_player = player * -1
     if player == WHITE:
-        best_value = -float('inf')
+        max_eval = float('-inf')
+        best_move = None
         for move in get_moves(state, player, line_made):
-            if isMoveValid(move, state):
-                apply_move(state, move)
-                value, _ = alphabeta(state, depth - 1, alpha, beta, next_player, line_made)
-                undo_move(state, move)
-
-                if value > best_value:
-                    best_value = value
-                    best_move = move
-                alpha = max(alpha, value)
-
-                if beta <= alpha:
-                    break
-    else:  
-        best_value = float('inf')
+            state_copy = copy.deepcopy(state)
+            apply_move(state_copy, move)
+            move_made_line = is_making_line(state_copy, move)
+            eval, _ = minimax(state_copy, depth - 1, next_player, move_made_line)
+            if eval > max_eval or best_move is None:
+                max_eval = eval
+                best_move = move
+        return max_eval, best_move
+    else:
+        min_eval = float('inf')
+        best_move = None
         for move in get_moves(state, player, line_made):
-            if isMoveValid(move, state):
-                apply_move(state, move)
-                value, _ = alphabeta(state, depth - 1, alpha, beta, next_player, line_made)
-                undo_move(state, move)
+            state_copy = copy.deepcopy(state)
+            apply_move(state_copy, move)
+            move_made_line = is_making_line(state_copy, move)
+            eval, _ = minimax(state_copy, depth - 1, next_player, move_made_line)
+            if eval < min_eval or best_move is None:
+                min_eval = eval
+                best_move = move
+        return min_eval, best_move
 
-                if value < best_value:
-                    best_value = value
-                    best_move = move
-                beta = min(beta, value)
 
-                if beta <= alpha:
-                    break
+def alphabeta(state, depth, alpha, beta, player, line_made=False):
+    if depth == 0 or is_end(state):
+        return evaluate(state), None
 
-    return best_value, best_move
+    next_player = player * -1
+    if player == WHITE:
+        value = float('-inf')
+        best_move = None
+        for move in get_moves(state, player, line_made):
+            state_copy = copy.deepcopy(state)
+            apply_move(state_copy, move)
+            move_made_line = is_making_line(state_copy, move)
+            eval, _ = alphabeta(state_copy, depth - 1, alpha, beta, next_player, move_made_line)
+            if eval > value:
+                value = eval
+                best_move = move
+            alpha = max(alpha, value)
+            if beta <= alpha:
+                break
+        return value, best_move
+    else:
+        value = float('inf')
+        best_move = None
+        for move in get_moves(state, player, line_made):
+            state_copy = copy.deepcopy(state)
+            apply_move(state_copy, move)
+            move_made_line = is_making_line(state_copy, move)
+            eval, _ = alphabeta(state_copy, depth - 1, alpha, beta, next_player, move_made_line)
+            if eval < value:
+                value = eval
+                best_move = move
+            beta = min(beta, value)
+            if beta <= alpha:
+                break
+        return value, best_move
+
+def alphabeta(state, depth, alpha, beta, player, line_made=False):
+    if depth == 0 or is_end(state):
+        return medium_evaluate(state), None
+
+    next_player = player * -1
+    if player == WHITE:
+        value = float('-inf')
+        best_move = None
+        for move in get_moves(state, player, line_made):
+            state_copy = copy.deepcopy(state)
+            apply_move(state_copy, move)
+            move_made_line = is_making_line(state_copy, move)
+            eval, _ = alphabeta(state_copy, depth - 1, alpha, beta, next_player, move_made_line)
+            if eval > value:
+                value = eval
+                best_move = move
+            alpha = max(alpha, value)
+            if beta <= alpha:
+                break
+        return value, best_move
+    else:
+        value = float('inf')
+        best_move = None
+        for move in get_moves(state, player, line_made):
+            state_copy = copy.deepcopy(state)
+            apply_move(state_copy, move)
+            move_made_line = is_making_line(state_copy, move)
+            eval, _ = alphabeta(state_copy, depth - 1, alpha, beta, next_player, move_made_line)
+            if eval < value:
+                value = eval
+                best_move = move
+            beta = min(beta, value)
+            if beta <= alpha:
+                break
+        return value, best_move
+
+
+            
+
+            
